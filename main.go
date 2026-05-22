@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -25,14 +26,17 @@ var (
 	threshold = flag.Int("threshold", defaultThreshold, "")
 	files     = flag.Bool("files", false, "")
 
-	html     = flag.Bool("html", false, "")
-	plumbing = flag.Bool("plumbing", false, "")
+	html             = flag.Bool("html", false, "")
+	plumbing         = flag.Bool("plumbing", false, "")
+	excludeGenerated = flag.Bool("exclude-generated", false, "")
 )
 
 const (
 	vendorDirPrefix = "vendor" + string(filepath.Separator)
 	vendorDirInPath = string(filepath.Separator) + vendorDirPrefix
 )
+
+var generatedHeader = regexp.MustCompile(`^// Code generated .* DO NOT EDIT\.$`)
 
 func init() {
 	flag.BoolVar(verbose, "v", false, "alias for -verbose")
@@ -92,8 +96,11 @@ func filesFeed() chan string {
 		go func() {
 			s := bufio.NewScanner(os.Stdin)
 			for s.Scan() {
-				f := s.Text()
-				fchan <- strings.TrimPrefix(f, "./")
+				f := strings.TrimPrefix(s.Text(), "./")
+				if *excludeGenerated && isGeneratedFile(f) {
+					continue
+				}
+				fchan <- f
 			}
 			close(fchan)
 		}()
@@ -120,6 +127,9 @@ func crawlPaths(paths []string) chan string {
 					return nil
 				}
 				if !info.IsDir() && strings.HasSuffix(info.Name(), ".go") {
+					if *excludeGenerated && isGeneratedFile(path) {
+						return nil
+					}
 					fchan <- path
 				}
 				return nil
@@ -199,6 +209,8 @@ Flags:
     	minimum token sequence size as a clone (default 100)
   -vendor
     	check files in vendor directory
+  -exclude-generated
+    	exclude auto-generated files (those containing a "Code generated ... DO NOT EDIT." header comment)
   -v, -verbose
     	explain what is being done
 
@@ -211,4 +223,29 @@ Examples:
   find app/ -name '*_test.go' |dupl -files
     	The same as above.`)
 	os.Exit(2)
+}
+
+// isGeneratedFile reports whether the file has the standard Go generated file
+// header comment, as per https://github.com/golang/go/issues/13560 .
+func isGeneratedFile(filename string) bool {
+	f, err := os.Open(filename)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	s := bufio.NewScanner(f)
+	// Scan up to a reasonable number of lines; the marker must appear
+	// before the package clause.
+	for i := 0; i < 20 && s.Scan(); i++ {
+		line := strings.TrimSpace(s.Text())
+		if generatedHeader.MatchString(line) {
+			return true
+		}
+		if strings.HasPrefix(line, "package ") {
+			// Reached package clause without seeing the generated marker.
+			return false
+		}
+	}
+	return false
 }
